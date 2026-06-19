@@ -19,10 +19,18 @@ conversation and extract the exact issue type and the specific object part they 
 RULES:
 1. You must output valid JSON matching the provided schema.
 2. Do NOT make policy decisions. Do NOT evaluate the truthfulness of the claim.
-3. Only extract what the user is asserting.
-4. Use the closest matching value for `issue_type` and `object_part` based on the allowed Enums.
-5. If the object part is not explicitly mentioned but implied (e.g. "my screen" on a laptop), map it correctly.
-6. If the issue or part cannot be determined from the text, strictly use "unknown".
+3. Do NOT inspect any images (none are provided anyway).
+4. Only extract what the user is asserting.
+5. Use the closest matching value for `claimed_issue` and `claimed_part` based on the allowed Enums.
+6. If the object part is not explicitly mentioned but implied (e.g. "my screen" on a laptop), map it correctly.
+7. If the issue or part cannot be determined from the text, strictly use "unknown".
+
+EXAMPLES:
+User: "My laptop screen cracked after shipping."
+Output: claimed_issue = "crack", claimed_part = "screen"
+
+User: "The rear bumper has a dent."
+Output: claimed_issue = "dent", claimed_part = "rear_bumper"
 """
 
 # ---------------------------------------------------------
@@ -42,8 +50,6 @@ def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[
         ClaimExtraction: A strictly typed Pydantic model containing the extracted details.
                          In case of failure, returns a safe fallback with "unknown" values.
     """
-    # In the final pipeline, client initialization can be injected or abstracted.
-    # We initialize here to maintain module independence as requested.
     client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
     
     user_prompt = f"Claim Object Type: {claim_object.value}\nUser Claim Transcript:\n{user_claim}"
@@ -52,7 +58,7 @@ def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[
         # We use the 'parse' method to leverage OpenAI's Structured Outputs (JSON Schema constraint)
         # This guarantees the LLM returns an exact match to our Pydantic model.
         response = client.beta.chat.completions.parse(
-            model="gpt-4o-mini",  # Faster and cheaper for simple text extraction tasks
+            model="gpt-4o-mini",  # Fast and cheap for simple text extraction
             messages=[
                 {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
@@ -72,9 +78,9 @@ def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[
         # Error Handling: LLM somehow bypassed schema constraints and hallucinated an invalid Enum.
         print(f"[Error] Validation Error during claim extraction: {e}")
         return ClaimExtraction(
-            issue_type="unknown",
-            object_part="unknown",
-            claim_object=claim_object
+            claim_object=claim_object,
+            claimed_issue="unknown",
+            claimed_part="unknown"
         )
         
     except Exception as e:
@@ -82,7 +88,7 @@ def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[
         # Fail gracefully by defaulting to unknown, which will trigger manual review downstream.
         print(f"[Error] API Error during claim extraction: {e}")
         return ClaimExtraction(
-            issue_type="unknown",
-            object_part="unknown",
-            claim_object=claim_object
+            claim_object=claim_object,
+            claimed_issue="unknown",
+            claimed_part="unknown"
         )
