@@ -3,7 +3,7 @@ from typing import Optional
 from openai import OpenAI
 from pydantic import ValidationError
 
-from .schemas import ClaimExtraction, ClaimObject
+from .schemas import ClaimExtraction, ClaimObject, IssueType, CarPart, LaptopPart, PackagePart
 
 # ---------------------------------------------------------
 # Prompt Design
@@ -17,26 +17,58 @@ You are an expert claims extraction assistant. Your job is to read a user's dama
 conversation and extract the exact issue type and the specific object part they are complaining about.
 
 RULES:
-1. You must output valid JSON matching the provided schema.
-2. Do NOT make policy decisions. Do NOT evaluate the truthfulness of the claim.
-3. Do NOT inspect any images (none are provided anyway).
-4. Only extract what the user is asserting.
-5. Use the closest matching value for `claimed_issue` and `claimed_part` based on the allowed Enums.
-6. If the object part is not explicitly mentioned but implied (e.g. "my screen" on a laptop), map it correctly.
-7. If the issue or part cannot be determined from the text, strictly use "unknown".
+1. Extract only what the user is claiming.
+2. Do not inspect images.
+3. Do not determine whether the claim is true.
+4. Do not perform risk assessment.
+5. Do not generate claim_status.
+6. Use the closest matching value for `claimed_issue` and `claimed_part` based on the allowed Enums.
+7. If issue cannot be confidently determined: use "unknown".
+8. If part cannot be confidently determined: use "unknown".
+9. If the user describes functionality problems rather than visible physical damage, prefer UNKNOWN for the issue. Images cannot directly verify functionality-based failures. The extraction stage should not invent physical damage.
 
 EXAMPLES:
-User: "My laptop screen cracked after shipping."
+User: "My rear bumper has a dent."
+Output: claimed_issue = "dent", claimed_part = "rear_bumper"
+
+User: "The laptop screen cracked."
 Output: claimed_issue = "crack", claimed_part = "screen"
 
-User: "The rear bumper has a dent."
-Output: claimed_issue = "dent", claimed_part = "rear_bumper"
+User: "My package arrived torn."
+Output: claimed_issue = "torn_packaging", claimed_part = "box"
+
+User: "My keyboard stopped working."
+Output: claimed_issue = "unknown", claimed_part = "keyboard"
+
+User: "The laptop won't turn on."
+Output: claimed_issue = "unknown", claimed_part = "unknown"
+
+User: "I think something is wrong with the package."
+Output: claimed_issue = "unknown", claimed_part = "unknown"
+
+User: "My battery drains quickly."
+Output: claimed_issue = "unknown", claimed_part = "unknown"
+
+User: "The WiFi is not working."
+Output: claimed_issue = "unknown", claimed_part = "unknown"
 """
+
+def _get_unknown_part(claim_object: ClaimObject):
+    """Returns the correct UNKNOWN enum for the specific claim object."""
+    if claim_object == ClaimObject.CAR:
+        return CarPart.UNKNOWN
+    elif claim_object == ClaimObject.LAPTOP:
+        return LaptopPart.UNKNOWN
+    elif claim_object == ClaimObject.PACKAGE:
+        return PackagePart.UNKNOWN
+    return CarPart.UNKNOWN  # Safe fallback
 
 # ---------------------------------------------------------
 # Extraction Logic
 # ---------------------------------------------------------
-
+# Claim extraction captures user allegations only.
+# It does not determine truth.
+# Verification happens later in the Evidence Validation stage.
 def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[str] = None) -> ClaimExtraction:
     """
     Extracts structured claim details from the raw user conversation.
@@ -48,7 +80,7 @@ def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[
         
     Returns:
         ClaimExtraction: A strictly typed Pydantic model containing the extracted details.
-                         In case of failure, returns a safe fallback with "unknown" values.
+                         In case of failure, returns a safe fallback with properly typed UNKNOWN values.
     """
     client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
     
@@ -79,8 +111,8 @@ def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[
         print(f"[Error] Validation Error during claim extraction: {e}")
         return ClaimExtraction(
             claim_object=claim_object,
-            claimed_issue="unknown",
-            claimed_part="unknown"
+            claimed_issue=IssueType.UNKNOWN,
+            claimed_part=_get_unknown_part(claim_object)
         )
         
     except Exception as e:
@@ -89,6 +121,6 @@ def extract_claim(user_claim: str, claim_object: ClaimObject, api_key: Optional[
         print(f"[Error] API Error during claim extraction: {e}")
         return ClaimExtraction(
             claim_object=claim_object,
-            claimed_issue="unknown",
-            claimed_part="unknown"
+            claimed_issue=IssueType.UNKNOWN,
+            claimed_part=_get_unknown_part(claim_object)
         )
