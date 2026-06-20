@@ -166,3 +166,8 @@ class FinalOutputRow(BaseModel):
     supporting_image_ids: str  # Semicolon-separated strings
     valid_image: bool
     severity: Severity
+
+class RequirementResolution(BaseModel):
+    """The resolved minimum image evidence requirement."""
+    requirement_id: str
+    requirement_text: str

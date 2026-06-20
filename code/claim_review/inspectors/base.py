@@ -5,7 +5,7 @@ from openai import OpenAI
 from pydantic import ValidationError
 
 from ..schemas import InspectionObservation, ClaimObject, IssueType, Severity
-from ..utils.images import encode_image, get_mime_type
+from ..utils.images import encode_image, get_mime_type, extract_image_id
 
 
 class BaseInspector(ABC):
@@ -50,7 +50,7 @@ class BaseInspector(ABC):
         observations = []
 
         for path in image_paths:
-            image_id = os.path.basename(path)
+            image_id = extract_image_id(path)
 
             if not os.path.exists(path):
                 print(f"[Warning] Image path not found: {path}")

@@ -18,3 +18,16 @@ def get_mime_type(path: str) -> str:
     elif lower.endswith(".gif"):
         return "image/gif"
     return "image/jpeg"
+
+
+def extract_image_id(path: str) -> str:
+    """
+    Extracts a clean image ID from a file path.
+    
+    Challenge requirement: image IDs must be filename WITHOUT extension.
+    
+    Examples:
+        images/test/case_001/img_1.jpg → img_1
+        images/test/case_002/photo.png → photo
+    """
+    return os.path.splitext(os.path.basename(path))[0]
