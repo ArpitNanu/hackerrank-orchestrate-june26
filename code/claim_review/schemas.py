@@ -95,6 +95,16 @@ class RiskFlag(str, Enum):
 # Models
 # ---------------------------------------------------------
 
+class UserHistoryRow(BaseModel):
+    """Structured representation of a user's claim history."""
+    past_claim_count: int = 0
+    accept_claim: int = 0
+    manual_review_claim: int = 0
+    rejected_claim: int = 0
+    last_90_days_claim_count: int = 0
+    history_flags: str = ""
+    history_summary: str = ""
+
 class ClaimExtraction(BaseModel):
     """Stage 1: Extract claim details from user conversation."""
     claim_object: ClaimObject = Field(description="The type of object claimed.")

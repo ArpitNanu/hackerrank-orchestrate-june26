@@ -1,6 +1,6 @@
 import os
 import csv
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .schemas import FinalOutputRow
 
 def _get_dataset_path(filename: str) -> str:

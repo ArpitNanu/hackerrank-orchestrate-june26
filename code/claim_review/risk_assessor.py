@@ -1,5 +1,5 @@
-from typing import List, Dict, Any
-from .schemas import ImageQualification, InspectionObservation, RiskAssessmentResult, RiskFlag
+from typing import List, Dict, Any, Optional
+from .schemas import ImageQualification, InspectionObservation, RiskAssessmentResult, RiskFlag, UserHistoryRow
 
 # ---------------------------------------------------------
 # Configurable Constants
@@ -14,7 +14,7 @@ MAX_RECENT_CLAIMS = 2
 def assess_risk(
     qualification: ImageQualification,
     observations: List[InspectionObservation],
-    user_history: Dict[str, Any]
+    user_history: UserHistoryRow
 ) -> RiskAssessmentResult:
     """
     Aggregates risk flags from images, observations, and user history.
@@ -41,14 +41,12 @@ def assess_risk(
         flags.add(flag)
         
     # 2. Add user_history_risk based on thresholds.
-    try:
-        rejected_claims = int(user_history.get("rejected_claim", 0))
-        recent_claims = int(user_history.get("last_90_days_claim_count", 0))
+    if user_history.rejected_claim > MAX_REJECTED_CLAIMS or user_history.last_90_days_claim_count > MAX_RECENT_CLAIMS:
+        flags.add(RiskFlag.USER_HISTORY_RISK)
         
-        if rejected_claims > MAX_REJECTED_CLAIMS or recent_claims > MAX_RECENT_CLAIMS:
-            flags.add(RiskFlag.USER_HISTORY_RISK)
-    except ValueError:
-        # Fallback if CSV parsing fails to yield integers
+    # Example logic using the other new history fields:
+    # If the user has a "fraud_warning" in their history flags, automatically flag.
+    if "fraud_warning" in user_history.history_flags.lower():
         flags.add(RiskFlag.USER_HISTORY_RISK)
         
     # 3. Add manual_review_required when specific qualification criteria fail.

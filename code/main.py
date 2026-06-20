@@ -46,14 +46,30 @@ def main():
             image_paths = [p.strip() for p in image_paths_str.split(";") if p.strip()]
             
             try:
+                # Look up user history for this specific user
+                raw_history = user_history_map.get(user_id, {})
+                
+                # Parse into Pydantic model so structured data is available
+                from claim_review.schemas import UserHistoryRow
+                user_history = UserHistoryRow(
+                    past_claim_count=int(raw_history.get("past_claim_count", 0)),
+                    accept_claim=int(raw_history.get("accept_claim", 0)),
+                    manual_review_claim=int(raw_history.get("manual_review_claim", 0)),
+                    rejected_claim=int(raw_history.get("rejected_claim", 0)),
+                    last_90_days_claim_count=int(raw_history.get("last_90_days_claim_count", 0)),
+                    history_flags=raw_history.get("history_flags", ""),
+                    history_summary=raw_history.get("history_summary", "")
+                )
+                
                 # The pipeline acts as the central orchestrator. 
-                # user_history_map and requirements are loaded into memory and available 
-                # for the pipeline to utilize via respective modules (e.g., risk_assessor, resolver).
+                # user_history is passed directly so risk_assessor can evaluate it.
+                # Requirements are pre-loaded into the resolver cache.
                 final_output = process_claim(
                     user_id=user_id,
                     user_claim=user_claim,
                     claim_object=claim_object,
                     image_paths=image_paths,
+                    user_history=user_history,
                     evidence_requirement=None  # Can be resolved internally by the pipeline
                 )
                 output_rows.append(final_output)

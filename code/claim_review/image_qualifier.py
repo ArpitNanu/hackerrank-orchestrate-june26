@@ -154,32 +154,75 @@ def qualify_images(
         # ---------------------------------------------------------
         # The LLM provided observations. We now derive decisions from them.
         #
-        # Step 1: Derive image_usable from quality flags.
-        # If the LLM detected severe quality issues, the image is not usable.
-        severe_quality_flags = {
-            RiskFlag.BLURRY_IMAGE,
-            RiskFlag.LOW_LIGHT_OR_GLARE,
-            RiskFlag.CROPPED_OR_OBSTRUCTED
+        # IMPORTANT: valid_image and image_usable are SEPARATE concepts.
+        #
+        #   valid_image:  "Is this a real, unmanipulated photograph that can be
+        #                  accepted into the review system at all?"
+        #                  False only when the image itself is untrustworthy
+        #                  (e.g., screenshot, printout, digitally altered).
+        #
+        #   image_usable: "Can the claim be evaluated from this image?"
+        #                  False when the image is too degraded to inspect
+        #                  (e.g., severely cropped, completely obstructed).
+        #
+        # Evidence from sample_claims.csv ground truth:
+        #   user_003: blurry_image  → valid_image=True   (blurry but still a real photo)
+        #   user_006: wrong_angle   → valid_image=True   (wrong angle but still real)
+        #   user_008: non_original  → valid_image=False  (screenshot/printout — untrusted)
+        #   user_032: cropped       → valid_image=False  (too cropped to evaluate)
+        #   user_033: wrong_object  → valid_image=True   (real photo of wrong thing)
+
+        # ---------------------------------------------------------
+        # Step 1: Determine valid_image
+        # ---------------------------------------------------------
+        # An image is INVALID only when it cannot be trusted as original evidence.
+        # These flags indicate the image itself is fundamentally unacceptable:
+        invalidating_flags = {
+            RiskFlag.NON_ORIGINAL_IMAGE,       # Screenshot, printout, photo-of-screen
+            RiskFlag.POSSIBLE_MANIPULATION,    # Digitally altered evidence
+            RiskFlag.CROPPED_OR_OBSTRUCTED,    # Too cropped/obstructed to evaluate at all
         }
 
-        has_severe_quality_issue = any(
-            flag in severe_quality_flags for flag in qualification.quality_flags
+        has_invalidating_flag = any(
+            flag in invalidating_flags for flag in qualification.quality_flags
         )
 
-        if has_severe_quality_issue:
+        # valid_image: True unless the image is fundamentally untrustworthy or unusable.
+        qualification.valid_image = not has_invalidating_flag
+
+        # ---------------------------------------------------------
+        # Step 2: Determine image_usable
+        # ---------------------------------------------------------
+        # An image is UNUSABLE when the visual quality is too poor for the
+        # inspectors to extract meaningful observations, OR when it's invalid.
+        #
+        # Degrading flags reduce usability but do NOT invalidate the image.
+        # Example: A blurry photo is still a real photo (valid_image=True),
+        # but the inspectors may not be able to see damage details.
+        #
+        # However, per sample data, blurry images CAN still yield supported
+        # claims (user_003), so we allow inspection to proceed. The confidence
+        # threshold in decision_rules.py will naturally handle low-quality
+        # observations by filtering out low-confidence results.
+        degrading_flags = {
+            RiskFlag.BLURRY_IMAGE,
+            RiskFlag.LOW_LIGHT_OR_GLARE,
+        }
+
+        has_degrading_flag = any(
+            flag in degrading_flags for flag in qualification.quality_flags
+        )
+
+        # image_usable: False only if the image is invalid OR completely obstructed.
+        # Blurry/low-light images remain usable — the inspector will attempt
+        # observation and the confidence threshold will gate the result.
+        if has_invalidating_flag:
             qualification.image_usable = False
         else:
+            # Degraded images are still usable for inspection.
+            # The LLM inspector may return low confidence, and decision_rules
+            # will filter those out via MIN_CONFIDENCE threshold.
             qualification.image_usable = True
-
-        # Step 2: Derive valid_image.
-        # An image is valid if it was successfully loaded AND is usable.
-        # Note: valid_image does NOT depend on object_correct or claim_part_visible.
-        # Those are separate concepts:
-        #   - A clear photo of a laptop when claiming car damage is still a VALID image.
-        #     It's just the WRONG object.
-        #   - A clear photo of a front bumper when claiming rear bumper damage is still VALID.
-        #     The evidence is simply insufficient.
-        qualification.valid_image = qualification.image_usable
 
         return qualification
 

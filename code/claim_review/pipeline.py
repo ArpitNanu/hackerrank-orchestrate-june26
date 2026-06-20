@@ -1,15 +1,17 @@
-from typing import List, Optional
+from typing import List, Dict, Any, Optional
 
 from .schemas import (
     ClaimObject, ClaimExtraction, ImageQualification, InspectionObservation,
     EvidenceValidationResult, RiskAssessmentResult, FinalOutputRow,
     IssueType, ClaimStatus, Severity, RiskFlag,
-    CarPart, LaptopPart, PackagePart
+    CarPart, LaptopPart, PackagePart, UserHistoryRow
 )
 from .claim_extractor import extract_claim
 from .image_qualifier import qualify_images
 from .decision_rules import evaluate_claim
 from .inspectors import CarInspector, LaptopInspector, PackageInspector
+from .risk_assessor import assess_risk
+from .requirements_resolver import resolve_requirements
 
 # ---------------------------------------------------------
 # Inspector Selection
@@ -54,44 +56,6 @@ def _aggregate_severity(observations: List[InspectionObservation]) -> Severity:
     return max_severity
 
 
-def _aggregate_risk_flags(
-    qualification: ImageQualification,
-    observations: List[InspectionObservation],
-    validation: EvidenceValidationResult
-) -> RiskAssessmentResult:
-    """
-    Stage 5: Aggregate risk flags from all prior stages.
-    This is deterministic — no LLM calls.
-    """
-    flags = list(qualification.quality_flags)
-
-    # If the object was wrong, flag it.
-    if not qualification.object_correct:
-        if RiskFlag.WRONG_OBJECT not in flags:
-            flags.append(RiskFlag.WRONG_OBJECT)
-
-    # If the claimed part was not visible, flag it.
-    if not qualification.claim_part_visible:
-        if RiskFlag.WRONG_OBJECT_PART not in flags:
-            flags.append(RiskFlag.WRONG_OBJECT_PART)
-
-    # If no damage was visible across any observation, flag it.
-    any_damage = any(obs.damage_visible for obs in observations)
-    if not any_damage:
-        if RiskFlag.DAMAGE_NOT_VISIBLE not in flags:
-            flags.append(RiskFlag.DAMAGE_NOT_VISIBLE)
-
-    # If evidence didn't meet the standard but claim wasn't contradicted, flag for review.
-    if not validation.evidence_standard_met and validation.claim_status != ClaimStatus.CONTRADICTED:
-        if RiskFlag.MANUAL_REVIEW_REQUIRED not in flags:
-            flags.append(RiskFlag.MANUAL_REVIEW_REQUIRED)
-
-    # If no flags were generated, explicitly mark none.
-    if not flags:
-        flags.append(RiskFlag.NONE)
-
-    return RiskAssessmentResult(risk_flags=flags)
-
 
 # ---------------------------------------------------------
 # Pipeline
@@ -112,6 +76,7 @@ def process_claim(
     user_claim: str,
     claim_object: str,
     image_paths: List[str],
+    user_history: Optional[UserHistoryRow] = None,
     evidence_requirement: Optional[str] = None,
     api_key: Optional[str] = None
 ) -> FinalOutputRow:
@@ -147,11 +112,30 @@ def process_claim(
         )
 
     # --------------------------------------------------
+    # Stage 1.5: Resolve Evidence Requirements
+    # --------------------------------------------------
+    # Look up the minimum evidence standard from evidence_requirements.csv
+    # based on what the user is claiming. This feeds into image qualification
+    # so the LLM knows what evidence bar to observe against.
+    try:
+        requirement = resolve_requirements(
+            claim_object=claim_object_enum,
+            claimed_issue=claim.claimed_issue,
+            claimed_part=claim.claimed_part.value
+        )
+        resolved_requirement = requirement.requirement_text
+    except Exception as e:
+        print(f"[Pipeline Error] Stage 1.5 (Requirements Resolution) failed: {e}")
+        resolved_requirement = evidence_requirement  # Fall back to caller-provided value
+
+    # --------------------------------------------------
     # Stage 2: Image Qualification
     # --------------------------------------------------
     # Determine whether the images are suitable for evaluation.
+    # The resolved evidence requirement text is passed so the LLM
+    # can observe against the specific minimum evidence standard.
     try:
-        qualification = qualify_images(image_paths, claim, evidence_requirement, api_key)
+        qualification = qualify_images(image_paths, claim, resolved_requirement, api_key)
     except Exception as e:
         print(f"[Pipeline Error] Stage 2 (Image Qualification) failed: {e}")
         qualification = ImageQualification(
@@ -197,9 +181,11 @@ def process_claim(
     # --------------------------------------------------
     # Stage 5: Risk Assessment
     # --------------------------------------------------
-    # Aggregate risk flags from all prior stages.
+    # Aggregate risk flags from all prior stages + user history.
+    # IMPORTANT: Risk assessment NEVER modifies supported/contradicted/not_enough_information.
+    # It only adds contextual risk_flags.
     try:
-        risk = _aggregate_risk_flags(qualification, observations, validation)
+        risk = assess_risk(qualification, observations, user_history or {})
     except Exception as e:
         print(f"[Pipeline Error] Stage 5 (Risk Assessment) failed: {e}")
         risk = RiskAssessmentResult(risk_flags=[RiskFlag.MANUAL_REVIEW_REQUIRED])
@@ -210,21 +196,97 @@ def process_claim(
     # Assemble all results into the challenge CSV row format.
     severity = _aggregate_severity(observations) if observations else Severity.UNKNOWN
 
-    # Determine the best visible_issue and visible_part from observations
-    # for the output row's issue_type and object_part fields.
+    # --------------------------------------------------
+    # Determine issue_type and object_part for output row.
+    # --------------------------------------------------
+    # Selection hierarchy (deterministic, per claim_status):
+    #
+    # SUPPORTED:
+    #   Use the matching observation (issue + part confirmed visually).
+    #   Fallback to claimed values if no exact match found.
+    #
+    # CONTRADICTED:
+    #   Use the BEST visual observation — what was actually seen.
+    #   This may differ from the claim (that's the contradiction).
+    #   If no observations exist (e.g., wrong object), use UNKNOWN/NONE.
+    #   Examples from sample data:
+    #     user_005: claimed dent → observed scratch → output scratch
+    #     user_020: claimed damage → observed none → output none
+    #     user_033: wrong object → output unknown
+    #
+    # NOT_ENOUGH_INFORMATION:
+    #   Use the best visual observation if one exists.
+    #   If no observations exist, use UNKNOWN.
+    #   Examples from sample data:
+    #     user_002: observed broken_part → output broken_part
+    #     user_006: nothing clear → output unknown
+    #     user_032: no usable images → output unknown
+
+    from .decision_rules import MIN_CONFIDENCE
+
     if validation.claim_status == ClaimStatus.SUPPORTED and observations:
-        # Use the observation that matched the claim.
+        # SUPPORTED: prefer the observation that matched the claim
         matched_obs = next(
             (obs for obs in observations
-             if obs.visible_issue == claim.claimed_issue and obs.visible_part == claim.claimed_part),
+             if obs.confidence >= MIN_CONFIDENCE
+             and obs.visible_issue == claim.claimed_issue
+             and obs.visible_part == claim.claimed_part),
             None
         )
-        issue_type = matched_obs.visible_issue if matched_obs else claim.claimed_issue
-        object_part = matched_obs.visible_part.value if matched_obs else claim.claimed_part.value
+        if matched_obs:
+            issue_type = matched_obs.visible_issue
+            object_part = matched_obs.visible_part.value
+        else:
+            # Fallback: claim was supported but no exact match in filtered obs
+            issue_type = claim.claimed_issue
+            object_part = claim.claimed_part.value
+
+    elif validation.claim_status == ClaimStatus.CONTRADICTED and observations:
+        # CONTRADICTED: report what was ACTUALLY observed, not what was claimed.
+        # Pick the highest-confidence observation on the claimed part.
+        best_obs = None
+        best_confidence = -1.0
+        for obs in observations:
+            if obs.confidence >= MIN_CONFIDENCE and obs.confidence > best_confidence:
+                best_obs = obs
+                best_confidence = obs.confidence
+
+        if best_obs:
+            issue_type = best_obs.visible_issue
+            object_part = best_obs.visible_part.value
+        else:
+            # No confident observations — contradiction from qualification checks
+            issue_type = IssueType.UNKNOWN
+            object_part = claim.claimed_part.value
+
+    elif validation.claim_status == ClaimStatus.NOT_ENOUGH_INFORMATION and observations:
+        # NOT_ENOUGH_INFO: report the best observation if available.
+        best_obs = None
+        best_confidence = -1.0
+        for obs in observations:
+            if obs.confidence >= MIN_CONFIDENCE and obs.confidence > best_confidence:
+                best_obs = obs
+                best_confidence = obs.confidence
+
+        if best_obs:
+            issue_type = best_obs.visible_issue
+            object_part = best_obs.visible_part.value
+        else:
+            issue_type = IssueType.UNKNOWN
+            object_part = claim.claimed_part.value
+
     else:
-        # Fall back to claimed values.
-        issue_type = claim.claimed_issue
-        object_part = claim.claimed_part.value
+        # No observations at all (images unusable, wrong object, etc.)
+        # Check qualification to decide between UNKNOWN and claimed values.
+        if not qualification.object_correct:
+            issue_type = IssueType.UNKNOWN
+            object_part = "unknown"
+        elif not qualification.claim_part_visible:
+            issue_type = IssueType.UNKNOWN
+            object_part = claim.claimed_part.value
+        else:
+            issue_type = claim.claimed_issue
+            object_part = claim.claimed_part.value
 
     return FinalOutputRow(
         user_id=user_id,
